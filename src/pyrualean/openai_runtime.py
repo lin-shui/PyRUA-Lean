@@ -511,7 +511,8 @@ def run_openai_agent(
                 totals[key] += usage[key]
             request_profile.append(totals["prompt"])  # cumulative, as the Claude runtime reports it
             choice = response["choices"][0]
-            finish_reasons.append(choice.get("finish_reason"))
+            finish_reason = choice.get("finish_reason")
+            finish_reasons.append(finish_reason)
             message = choice.get("message") or {}
             calls = message.get("tool_calls") or []
             content = message.get("content")
@@ -539,14 +540,14 @@ def run_openai_agent(
                 if isinstance(assistant["content"], str)
                 else 0,
                 reasoning_chars=len(reasoning or ""),
-                finish_reason=choice.get("finish_reason"),
+                finish_reason=finish_reason,
                 usage=usage,
             )
             if not calls:
                 if tool_choice == "required":
                     warnings.append(
                         f"request {requests}: no tool call despite tool_choice=required "
-                        f"(finish_reason={choice.get('finish_reason')!r})"
+                        f"(finish_reason={finish_reason!r})"
                     )
                 done = (
                     arm_toolkit.finish is not None
@@ -575,6 +576,19 @@ def run_openai_agent(
                 t0 = time.perf_counter()
                 if problem:
                     malformed += 1
+                    # Never replay invalid arguments: a provider whose tool-call
+                    # template parses them (llama.cpp with --jinja does) refuses
+                    # the whole conversation with a 500, and the retry resends
+                    # the same history, so one bad reply kills the episode.
+                    # "{}" is a valid call that runs no code; the error below is
+                    # the model's feedback to answer it differently.
+                    call.setdefault("function", {})["arguments"] = "{}"
+                    if finish_reason == "length":
+                        problem = (
+                            "the reply was cut off at the output token limit before its "
+                            "tool call was complete; write one shorter cell (about 40 "
+                            "lines at most) and call `python` again"
+                        )
                     result = ArmResult({"error": problem})
                 else:
                     result = _execute_with_deadline(

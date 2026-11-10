@@ -23,6 +23,7 @@ def _reply(
     text: str | None = None,
     reasoning: str | None = None,
     usage: dict[str, Any] | None = None,
+    finish: str | None = None,
 ) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "assistant", "content": text}
     if reasoning:
@@ -40,7 +41,8 @@ def _reply(
             for call_id, name, args in tool_calls
         ]
     return {
-        "choices": [{"message": message, "finish_reason": "tool_calls" if tool_calls else "stop"}],
+        "choices": [{"message": message,
+                     "finish_reason": finish or ("tool_calls" if tool_calls else "stop")}],
         "usage": usage
         or {
             "prompt_tokens": 1000,
@@ -532,3 +534,30 @@ def test_a_long_tool_call_is_cut_off_at_the_wall_clock(robo, tmp_path, card_imag
     # The cell needs ~2 s for its 40 moves; the stop cuts it at the first move past 0.4 s.
     assert generation["elapsed_s"] < 1.5, generation["elapsed_s"]
     assert toolkit.turns[-1]["tool"] == "python"
+
+
+def test_a_truncated_tool_call_is_never_replayed_as_invalid_json(robo, tmp_path, card_images):
+    """A reply cut off at max_tokens must not poison the conversation.
+
+    llama.cpp's --jinja tool-call template parses every replayed tool call's arguments; one
+    truncated string makes it answer HTTP 500 to every later request, and the retry resends the
+    same history, so the episode dies as a provider failure. The runtime must replace the bad
+    arguments before the next request and tell the model the reply was cut off.
+    """
+    toolkit = _toolkit(robo, tmp_path)
+    broken = '{"code": "# a long cell that was cut off\\nprint('
+    transport = ScriptedTransport(
+        [
+            _reply([("c1", "python", broken)], finish="length"),
+            _reply([("c2", "finish", {"status": "success", "summary": "done"})], text="Done."),
+        ]
+    )
+    generation = _run(toolkit, transport, tmp_path, card_images, max_turns=5)
+
+    assert generation["status"] == "completed"
+    messages = transport.requests[1]["body"]["messages"]
+    assistant = next(m for m in messages if m["role"] == "assistant" and m.get("tool_calls"))
+    assert assistant["tool_calls"][0]["function"]["arguments"] == "{}"
+    assert broken not in json.dumps(messages)
+    tool = next(m for m in messages if m["role"] == "tool")
+    assert "cut off at the output token limit" in tool["content"]
