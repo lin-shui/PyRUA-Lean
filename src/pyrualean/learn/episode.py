@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..evolve.splits import json_hash, tree_hash
-from .config import robocasa, scene_seed
+from .config import piper, robocasa, scene_seed
 
 
 def execution_identity(config: dict[str, Any]) -> str:
@@ -42,6 +42,27 @@ def execution_identity(config: dict[str, Any]) -> str:
                 "policy": _policy_hash(repo / "src" / "pyrualean"),
                 "kitchen": {name: _py_hash(packages / name) for name in ("robocasa", "robosuite")},
                 "sam3": config.get("sam3_sha256"),
+            }
+        )
+    if piper(config):
+        # the twin's scenes and scenarios are the layouts; a changed drawer position
+        # between rounds would make earlier dev batches incomparable
+        root = Path(config["twin_root"])
+        world = {}
+        for split in ("dev", "test"):
+            for name in config["scenarios"][split]:
+                scenario = root / "scenarios" / f"{name}.json"
+                scene = json.loads(scenario.read_text())["scene"]
+                world[name] = {
+                    "scenario": json_hash(scenario.read_text()),
+                    "scene": json_hash((root / "scenes" / f"{scene}.json").read_text()),
+                }
+        return json_hash(
+            {
+                "execution": config["execution"],
+                "policy": _policy_hash(repo / "src" / "pyrualean"),
+                "twin": world,
+                "missions": config.get("missions") or {},
             }
         )
     source = Path(config["source_root"])
@@ -150,14 +171,19 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("code, benchmark or execution settings changed during the campaign")
     output = Path(request["output"]) / "episode"
     output.mkdir(parents=True, exist_ok=False)
-    os.environ["SAM3_CHECKPOINT_PATH"] = config["sam3_checkpoint"]
+    if not piper(config):
+        # the twin's SAM3 is the remote service (SAM3_ENDPOINT set in the environment);
+        # the RoboDojo/RoboCasa hosts load the checkpoint in-process.
+        os.environ["SAM3_CHECKPOINT_PATH"] = config["sam3_checkpoint"]
     replay = request.get("replay_dir")
     expansion = layout_expansion(
         config, request["task"], int(request["eval_seed"]), int(request["layout"])
     )
     if expansion is not None:
         append_expansion(expansion["text"])
-    if robocasa(config):
+    if piper(config):
+        result = _piper_episode(request, output, replay)
+    elif robocasa(config):
         result = _robocasa_episode(request, output, replay)
     else:
         result = _robodojo_episode(request, output, replay)
@@ -174,6 +200,57 @@ def run(request: dict[str, Any]) -> dict[str, Any]:
     temporary.write_text(json.dumps(result, indent=2, default=str, ensure_ascii=False) + "\n")
     temporary.replace(output / "result.json")
     return result
+
+
+def _piper_episode(request: dict[str, Any], output: Path, replay: Any) -> dict[str, Any]:
+    """One twin cell: the layout's steward scenario, the piper_twin host and policy contract."""
+
+    from ..hosts.piper_twin import Cell
+    from ..play import play_episode
+
+    config = request["config"]
+    settings = config["execution"]
+    split = request["split"]
+    task = request["task"]
+    mission = str((config.get("missions") or {}).get(task, task))
+    index = config[split]["layouts"].index(int(request["layout"]))
+    scenario = config["scenarios"][split][index]
+    root = Path(config["twin_root"])
+    scenario_data = json.loads((root / "scenarios" / f"{scenario}.json").read_text())
+    cell = Cell(
+        task=mission,
+        scenario=scenario,
+        instruction=str(scenario_data.get("task") or mission),
+        seed=int(request["layout"]),
+        max_episode_steps=int(config["max_episode_steps"]),
+        cuda_device=request.get("gpu"),
+    )
+    return play_episode(
+        cell,
+        output,
+        arm="cells",
+        max_attempts=1,
+        model=settings["model"] if not replay else "replay",
+        reasoning_effort=settings.get("extra_body", {}).get("reasoning_effort", "high"),
+        budget_s=settings["policy_seconds"],
+        max_turns=settings["max_cells"],
+        runtime="replay" if replay else settings.get("runtime", "openai"),
+        codex_bin=settings.get("codex_bin", "codex"),
+        codex_home=settings.get("codex_home"),
+        replay_dir=replay,
+        robot="piper_twin",
+        primitives="full",
+        images=settings["images"],
+        feedback=settings["feedback"],
+        library=request["view"],
+        base_url=settings["base_url"],
+        api_key_env=settings["api_key_env"],
+        boot_options={
+            "twin_python": config["twin_python"],
+            "twin_root": config["twin_root"],
+        },
+        openai_options=_openai_options(settings),
+    )
 
 
 def _openai_options(settings: dict[str, Any]) -> dict[str, Any]:

@@ -1,0 +1,85 @@
+{
+ "benchmark": "piper",
+ "label": "Piper twin drawer: 2 dev layouts, 2 held-out test layouts; v0 baseline (rounds=1)",
+ "tasks": [
+  "drawer_open"
+ ],
+ "scenarios": {
+  "dev": [
+   "piper-drawer-a",
+   "piper-drawer-b"
+  ],
+  "test": [
+   "piper-drawer-c",
+   "piper-drawer-d"
+  ]
+ },
+ "dev": {
+  "eval_seed": 1,
+  "layouts": [
+   0,
+   1
+  ]
+ },
+ "test": {
+  "eval_seed": 2,
+  "layouts": [
+   0,
+   1
+  ]
+ },
+ "rounds": 1,
+ "run_test": true,
+ "twin_python": "/Users/lilin/env/piper-twin/bin/python",
+ "twin_root": "/Users/lilin/game/steward/var/steward",
+ "max_episode_steps": 20000,
+ "learning": {
+  "rollback_if_worse_by": 2,
+  "pause_after_provider_failures": 3
+ },
+ "slots": {
+  "gpus": [
+   0
+  ],
+  "per_gpu": 1,
+  "stagger_seconds": 0,
+  "min_free_gib": 0
+ },
+ "budgets": {
+  "max_launches": 20,
+  "max_hours": 4,
+  "max_infra_retries": 2,
+  "episode_watchdog_seconds": 900
+ },
+ "execution": {
+  "runtime": "openai",
+  "model": "pyrua-coder-4b",
+  "base_url": "http://169.254.10.2:8899/v1",
+  "api_key_env": "OPENAI_API_KEY",
+  "suite": "piper",
+  "images": "on-motion",
+  "feedback": "pure",
+  "max_cells": 30,
+  "max_model_requests": 120,
+  "max_tokens": 8192,
+  "nudges": 4,
+  "policy_seconds": 600,
+  "provider_retries": 2,
+  "extra_body": {}
+ },
+ "worker": {
+  "command": "/Users/lilin/game/PyRUA-Lean/scripts/dsh_worker.py",
+  "model": "deepseek-flash",
+  "effort": "high",
+  "seconds": 7200,
+  "concurrency": 1,
+  "token_env": "ANTHROPIC_API_KEY"
+ },
+ "environment": {
+  "SAM3_ENDPOINT": "127.0.0.1:8114",
+  "MUJOCO_GL": "cgl"
+ },
+ "missions": {
+  "drawer_open": "drawer-open"
+ }
+}

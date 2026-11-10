@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from ..evolve.library import LESSON_RE, SKILL_RE, Library, LibraryError, parse_lessons, validate
-from .config import load, robocasa
+from .config import load, piper, robocasa
 from .episode import EXPANSION_HEADING
 
 BRIEF = """# Worker brief: {task}, round {round}
@@ -447,6 +447,76 @@ ROBOCASA_BLIND_BRIEF = _replaced(
     ),
 )
 
+PIPER_BRIEF = """# Worker brief: the Cobot Magic twin, task `{task}`, round {round}
+
+You improve the skill library of ONE task, `{task}`: "Open the cabinet drawer." in the AgileX
+Cobot Magic twin. The policy is a small code model writing short Python cells against a frozen
+`robo` API; the library is the only thing that changes between rounds: skills (Python modules
+the policy may import) and lesson cards appended to its prompt. The robot, the cameras, the
+perception service, the base knowledge and the twin's verdict are frozen.
+
+Working directory: this session directory. Write only under `candidate/tasks/{task}/` and
+`FINDINGS.md`, `notes/` and `replays/` here. Everything else is read-only evidence.
+
+## The twin and the policy
+- Two 6-DoF PiPER arms with parallel grippers, three calibrated RGB-D cameras (`cam_head`,
+  two wrist cameras), all in MuJoCo. Each episode is one cabinet layout: the dev scenes here
+  place the cabinet at different positions.
+- The policy calls `state()`, `move_to(xyz, arm=..., pitch=..., yaw=..., roll=...)`,
+  `move_joints(arm, joints)`, `set_gripper(arm, CLOSE/OPEN)`, `home(arm)`,
+  `locate(...)`, `segment(...)`, `back_project(row, col, camera)` and `finish(...)`,
+  and reads `image(camera)`.
+- SAM3 is served remotely. On the twin's synthetic renders the text prompt head scores near
+  zero; a point prompt (`locate(point=[row, col])`) scores ~0.97. This is the policy's main
+  perception route.
+- The episode ends when the policy calls `finish` or the native step budget is spent. The twin
+  judges the final drawer state; its exact check is not shown to you or to the policy. The
+  digest says success and why the episode ended. `finish` status is the policy's own claim,
+  not the verdict: OVERCLAIM means it claimed success and the twin judged a failure.
+- `max_episode_steps` counts SIM TICKS, not control steps: one settle costs up to 400 ticks,
+  one long incrementing move about 4000. Wandering through perception burns the budget.
+
+## Inputs
+- `episodes.md`: every dev episode of the parent revision `{parent}` (digest, why it ended,
+  run dir). Run dirs hold `workspace/cell_*.py` (the policy's code), `openai_events.jsonl`
+  (its turns and primitive results), `tool_turns.json`, `calls.jsonl`,
+  `steps/NNNN/*.png` (camera frames) and `prompt.txt` (exactly what the policy was told).
+- `history.md`: earlier rounds, what changed and how it did.
+- `candidate/`: a copy of the parent revision;
+  `candidate/tasks/{task}/skills/*.py` and `candidate/tasks/{task}/lessons/*.md`.
+- API sources (read-only): {api_sources}
+
+## Method
+1. For each episode find the earliest wrong step (cell, frames, the model's reasoning) and
+   classify it: information / judgement / capability / uncertain. An OVERCLAIM episode has a
+   second wrong step: the moment the policy took the task for done. Name what it believed and
+   what the frames or results contradicted; that is a judgement card even if the manipulation
+   is also broken.
+2. Group episodes by cause. Fix the cause that keeps the most layouts from succeeding;
+   between equals, the one that blocks the earliest step. Make ONE coherent change: a skill
+   when the fix is procedure the policy keeps getting wrong, a lesson when it is judgement,
+   ordering or what to look at.
+3. Test a code fix without the model. Put cells under `replays/cells-<name>/cell_001.py ...`
+   (they may `from library.<module> import <fn>`; the candidate is installed as `library/`)
+   and run `python -m pyrualean.learn.replay replays/cells-<name> --layout <dev layout>`.
+   It boots the twin, runs the cells, and prints the verdict, each cell's output and the run
+   dir with frames. Budget: {max_replays} replays this session, {per_layout} per layout.
+   A replay starts from the layout's initial state and takes minutes; run one at a time. A
+   replay that only runs without error is not evidence; evidence is getting further than the
+   parent episode on that layout (success or a real step beyond where it stopped).
+4. Validate: `python -m pyrualean.learn.worker check` must print `ok`.
+
+## Deliverable
+- The candidate change under `candidate/tasks/{task}/` (skills and/or lessons).
+- `FINDINGS.md`: one paragraph per episode with the earliest wrong step, the cause, and what
+  you changed; then the replay evidence and what you could not fix.
+
+## Time
+You have {minutes} minutes; write a candidate that passes `check` and a first FINDINGS.md by
+minute {soft}, then refine. Work saved in `candidate/`, `replays/` and `FINDINGS.md` survives if
+the session is cut off.{resume}
+"""
+
 SCORING_MODES = ("on", "off")
 
 #: What an episode run dir may show a worker with scoring off: what the policy saw and did.
@@ -569,6 +639,10 @@ def prepare(
     if robocasa(config):
         api = ("robocasa_rgb.py", "_robot.py")
         brief = ROBOCASA_BRIEF if scoring == "on" else ROBOCASA_BLIND_BRIEF
+    elif piper(config):
+        # one brief: the twin's verdict is a scene fact, not a check the worker should fit
+        api = ("piper_twin.py", "hosts/piper_twin.py", "hosts/piper_sight.py", "_robot.py")
+        brief = PIPER_BRIEF
     # where a run dir holds the model's turns: the Codex CLI's events (runtime codex) or
     # messages.json
     turns = (
@@ -629,8 +703,11 @@ def expansion_sources(config: dict[str, Any], task: str) -> list[Path]:
 
 def scoring_sources(config: dict[str, Any], task: str) -> list[Path]:
     """RoboDojo's success definition of ``task``: its checks, and what each check measures.
-    RoboCasa's: the file of the kitchen package that defines the task's class."""
+    RoboCasa's: the file of the kitchen package that defines the task's class. The twin's
+    verdict is a scene fact (the drawer's slide), not a check the learner should fit: none."""
 
+    if piper(config):
+        return []
     if robocasa(config):
         kitchen = Path(config["sim_packages"]).resolve() / "robocasa" / "environments" / "kitchen"
         pattern = re.compile(rf"^class {re.escape(task)}\b", re.MULTILINE)
@@ -654,6 +731,8 @@ def other_judges(config: dict[str, Any], task: str, evidence: Path) -> list[str]
     source root)."""
 
     own = set(scoring_sources(config, task))
+    if piper(config):
+        return []
     # RoboCasa: the folder of the task's file holds the other tasks' classes
     folders = sorted(
         {path.parent for path in own if path.parent.name in ("tasks", "config") or robocasa(config)}
@@ -737,8 +816,15 @@ def command(config: dict[str, Any], session: Path) -> list[str]:
         # everything is in the session (evidence/, sources/): nothing outside it is readable,
         # and what holds RoboDojo's code or the unfiltered runs is denied outright
         hidden = [
-            # the benchmark: RoboDojo's tree, or the kitchen's packages (robocasa, robosuite)
-            str(Path(config["sim_packages" if robocasa(config) else "source_root"]).resolve()),
+            # the benchmark: RoboDojo's tree, the kitchen's packages (robocasa, robosuite),
+            # or the twin's data root (its scenarios include the test layouts)
+            str(
+                Path(
+                    config.get("twin_root")
+                    if piper(config)
+                    else config["sim_packages" if robocasa(config) else "source_root"]
+                ).resolve()
+            ),
             str(evidence.parent.parent),
             str(Path(spec["campaign"]).resolve() / ".replays"),
             str(sources / "learn"),

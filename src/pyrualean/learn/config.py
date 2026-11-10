@@ -96,6 +96,13 @@ def robocasa(config: dict[str, Any]) -> bool:
     return config.get("benchmark", "robodojo") == "robocasa"
 
 
+def piper(config: dict[str, Any]) -> bool:
+    """A twin campaign (``"benchmark": "piper"``): tasks are the twin's missions, and each
+    layout names a steward scenario in ``scenarios[dev|test]``; the robot is ``piper_twin``."""
+
+    return config.get("benchmark") == "piper"
+
+
 def scene_seeds(config: dict[str, Any], split: str, task: str) -> list[int]:
     """The scene seeds of a robocasa split, by layout: ``seed_overrides[split][task]`` or
     ``scene_seeds[split]`` (as eval/robocasa's ``seed_overrides``: the paper's CoffeeSetupMug)."""
@@ -112,11 +119,11 @@ def scene_seed(config: dict[str, Any], split: str, task: str, layout: int) -> in
 
 def check(config: dict[str, Any]) -> None:
     tasks = config.get("tasks") or []
-    if config.get("benchmark", "robodojo") not in ("robodojo", "robocasa"):
-        raise ConfigError("benchmark is robodojo (the default) or robocasa")
+    if config.get("benchmark", "robodojo") not in ("robodojo", "robocasa", "piper"):
+        raise ConfigError("benchmark is robodojo (the default), robocasa or piper")
     if not tasks or len(set(tasks)) != len(tasks):
         raise ConfigError("tasks must be distinct names")
-    if not robocasa(config) and set(tasks) - set(TASKS):
+    if not robocasa(config) and not piper(config) and set(tasks) - set(TASKS):
         raise ConfigError(f"tasks must be distinct names from {TASKS}")
     dev, test = config.get("dev") or {}, config.get("test") or {}
     for name, split in (("dev", dev), ("test", test)):
@@ -124,6 +131,21 @@ def check(config: dict[str, Any]) -> None:
             raise ConfigError(f"{name}: eval_seed in 0..2 and a nonempty layout list")
     if dev["eval_seed"] == test["eval_seed"]:
         raise ConfigError("dev and test must use different eval seeds (disjoint layout sets)")
+    if piper(config):
+        scenarios = config.get("scenarios") or {}
+        for name, split in (("dev", dev), ("test", test)):
+            names = scenarios.get(name)
+            if not isinstance(names, list) or len(names) != len(split["layouts"]):
+                raise ConfigError(
+                    f"piper: scenarios.{name} must name one steward scenario per layout"
+                )
+            if len(set(names)) != len(names):
+                raise ConfigError(f"piper: scenarios.{name} must be distinct")
+        if set(scenarios["dev"]) & set(scenarios["test"]):
+            raise ConfigError("piper: dev and test scenarios must be disjoint")
+        for field in ("twin_python", "twin_root", "max_episode_steps"):
+            if not config.get(field):
+                raise ConfigError(f"piper: {field} is required")
     if robocasa(config):
         seeds = config.get("scene_seeds") or {}
         for name in ("dev", "test"):
@@ -169,6 +191,9 @@ def check(config: dict[str, Any]) -> None:
     if budgets["episode_watchdog_seconds"] <= execution["policy_seconds"]:
         raise ConfigError("the watchdog must leave the episode its policy wall clock and boot")
     fields = ("source_root", "sim_python", "sam3_checkpoint")
+    if piper(config):
+        # the twin interpreter and its steward data root; SAM3 is the remote service
+        fields = ("twin_python", "twin_root")
     if robocasa(config):
         # the kitchen's interpreter, its site-packages (robocasa, robosuite) and its assets
         fields = ("sim_python", "sim_packages", "robocasa_assets", "sam3_checkpoint")
