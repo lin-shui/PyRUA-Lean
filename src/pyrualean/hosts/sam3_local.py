@@ -188,17 +188,114 @@ class LocalSam3:
             return select_top(masks, scores, None, min_score)
 
 
-_SHARED: dict[tuple[str, str], LocalSam3] = {}
+class RemoteSam3:
+    """SAM3 over RPent's HTTP RPC service (``rpent.robots.components.sam3_server``).
+
+    Same ``segment`` contract as :class:`LocalSam3`, so a host can serve the
+    model from a separate process: the 3.3 GB checkpoint is loaded once and
+    the policy's interpreter does not need torch or the sam3 package.
+    """
+
+    def __init__(self, endpoint: str) -> None:
+        self._base = endpoint.rstrip("/")
+        if not self._base.startswith(("http://", "https://")):
+            self._base = f"http://{self._base}"
+        self._lock = threading.Lock()
+
+    def segment(
+        self,
+        image: Any,
+        *,
+        text_prompt: str | None = None,
+        point: list[int] | None = None,
+        min_score: float = 0.2,
+    ) -> Segmented:
+        import base64
+        import io
+        import json
+        import urllib.request
+
+        from PIL import Image
+
+        has_text = isinstance(text_prompt, str) and bool(text_prompt.strip())
+        if has_text == (point is not None):
+            raise ValueError("provide exactly one of text_prompt or point")
+        if point is not None and (not isinstance(point, (list, tuple)) or len(point) != 2):
+            raise ValueError("point must be [row, col]")
+        min_score = float(min_score)
+        if not 0.0 <= min_score <= 1.0:
+            raise ValueError("min_score must be between 0 and 1")
+        pixels = np.ascontiguousarray(np.asarray(image)[..., :3].astype(np.uint8))
+        buffer = io.BytesIO()
+        Image.fromarray(pixels, mode="RGB").save(buffer, format="PNG")
+        kwargs: dict[str, Any] = {
+            "image_base64": base64.b64encode(buffer.getvalue()).decode("ascii"),
+            "min_score": min_score,
+        }
+        if has_text:
+            kwargs["text_prompt"] = str(text_prompt).strip()
+        else:
+            assert point is not None
+            kwargs["point"] = [int(point[0]), int(point[1])]
+        body = json.dumps(
+            {"method": "sam3.segment", "args": [], "kwargs": kwargs, "session_id": None}
+        ).encode("utf-8")
+        request = urllib.request.Request(  # noqa: S310 - operator-supplied endpoint
+            self._base + "/call",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self._lock:
+            with urllib.request.urlopen(request, timeout=180) as reply:  # noqa: S310
+                payload = json.loads(reply.read().decode("utf-8"))
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            error = payload.get("error") if isinstance(payload, dict) else payload
+            raise RuntimeError(f"SAM3 service refused the request: {error}")
+        result = payload.get("result") or {}
+        if not isinstance(result, dict) or not isinstance(result.get("found"), bool):
+            raise RuntimeError(f"invalid SAM3 segment response: {result!r}")
+        score = result.get("score")
+        box = result.get("box")
+        if not result["found"]:
+            return Segmented(
+                False,
+                score=None if score is None else float(score),
+                box=box,
+                reason=str(result.get("reason") or "SAM3 found no mask"),
+            )
+        encoded = result.get("mask_png_base64")
+        shape = result.get("mask_shape")
+        if not isinstance(encoded, str) or not encoded:
+            raise RuntimeError("SAM3 response marked found but omitted mask_png_base64")
+        mask = np.asarray(Image.open(io.BytesIO(base64.b64decode(encoded))).convert("L")) > 0
+        if not mask.any():
+            return Segmented(False, score=score, box=box, reason="SAM3 returned an empty mask")
+        if isinstance(shape, list) and len(shape) == 2:
+            mask = mask.reshape(int(shape[0]), int(shape[1]))
+        return Segmented(
+            True, score=None if score is None else float(score), box=box, mask=mask
+        )
+
+
+_SHARED: dict[tuple[str, str], Any] = {}
 _SHARED_LOCK = threading.Lock()
 
 
-def shared(checkpoint: str | None = None, cuda_device: int | None = None) -> LocalSam3:
-    """The process's one :class:`LocalSam3` for a checkpoint and the cards it may see.
+def shared(checkpoint: str | None = None, cuda_device: int | None = None) -> Any:
+    """The process's one SAM3 client: remote when ``SAM3_ENDPOINT`` is set, else local.
 
     A policy server plays one episode after another: the model is loaded for the first and
     serves the rest (a second copy would cost its load time and the card its memory).
     """
 
+    endpoint = os.environ.get("SAM3_ENDPOINT") or ""
+    if endpoint:
+        key = ("remote", endpoint)
+        with _SHARED_LOCK:
+            if key not in _SHARED:
+                _SHARED[key] = RemoteSam3(endpoint)
+            return _SHARED[key]
     path = checkpoint or os.environ.get("SAM3_CHECKPOINT_PATH") or ""
     key = (path, os.environ.get("CUDA_VISIBLE_DEVICES") or str(cuda_device))
     with _SHARED_LOCK:
@@ -207,4 +304,4 @@ def shared(checkpoint: str | None = None, cuda_device: int | None = None) -> Loc
         return _SHARED[key]
 
 
-__all__ = ["LocalSam3", "Segmented", "select_top", "shared"]
+__all__ = ["LocalSam3", "RemoteSam3", "Segmented", "select_top", "shared"]

@@ -33,6 +33,8 @@ from .prompt import TaskCard, api_reference, render_prompt
 from .runner import run_host
 
 HOST_MODULE = "pyrualean.hosts.rpent_{robot}"
+#: Robots whose host is not an RPent wrapper keep their own module name.
+HOST_MODULES = {"piper_twin": "pyrualean.hosts.piper_twin"}
 #: Extra wall-clock allowed for RPent's servers to start before the policy
 #: budget begins (env + Pi0.5 + SAM3 cold start is typically 2-3 minutes).
 STARTUP_ALLOWANCE_S = 900.0
@@ -47,6 +49,10 @@ def _cell_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--task", required=True, help="LIBERO task index or the robot's task name")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--scenario", default=None, help="steward scenario name (piper_twin)")
+    parser.add_argument(
+        "--instruction", default="", help="task instruction shown to the policy (piper_twin)"
+    )
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--cuda-device", type=int, default=None)
     parser.add_argument("--max-episode-steps", type=int, default=10000)
@@ -59,7 +65,7 @@ def _host_argv(args: argparse.Namespace, command: str) -> list[str]:
     argv = [
         args.python,
         "-m",
-        HOST_MODULE.format(robot=args.robot),
+        HOST_MODULES.get(args.robot) or HOST_MODULE.format(robot=args.robot),
         command,
         "--task",
         str(args.task),
@@ -72,6 +78,11 @@ def _host_argv(args: argparse.Namespace, command: str) -> list[str]:
     ]
     if args.suite:
         argv += ["--suite", args.suite]
+    if args.robot == "piper_twin":
+        if getattr(args, "scenario", None):
+            argv += ["--scenario", str(args.scenario)]
+        if getattr(args, "instruction", None):
+            argv += ["--instruction", str(args.instruction)]
     if args.robot == "libero":
         argv += ["--libero-type", args.libero_type]
     if args.cuda_device is not None:

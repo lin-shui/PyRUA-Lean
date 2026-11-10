@@ -32,6 +32,7 @@ ROBOTS: tuple[str, ...] = (
     "robodojo_xpl_rgb",
     "robodojo_xpl_rgb_pi05",
     "robocasa_rgb",
+    "piper_twin",
 )
 
 
